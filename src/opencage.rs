@@ -38,6 +38,8 @@ use num_traits::Float;
 use serde::Deserializer;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 macro_rules! add_optional_param {
@@ -145,7 +147,10 @@ impl<'a> Opencage<'a> {
     ///     "Carrer de Calatrava"
     /// );
     ///```
-    pub fn reverse_full<T>(&self, point: &Point<T>) -> Result<OpencageResponse<T>, GeocodingError>
+    pub async fn reverse_full<T>(
+        &self,
+        point: &Point<T>,
+    ) -> Result<OpencageResponse<T>, GeocodingError>
     where
         T: Float + DeserializeOwned + Debug,
     {
@@ -167,7 +172,8 @@ impl<'a> Opencage<'a> {
             .client
             .get(&self.endpoint)
             .query(&query)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
         // it's OK to index into this vec, because reverse-geocoding only returns a single result
         if let Some(headers) = resp.headers().get::<_>(XRL) {
@@ -179,7 +185,7 @@ impl<'a> Opencage<'a> {
                 **mutex = Some(h)
             }
         }
-        let res: OpencageResponse<T> = resp.json()?;
+        let res: OpencageResponse<T> = resp.json().await?;
         Ok(res)
     }
     /// A forward-geocoding lookup of an address, returning an annotated response.
@@ -243,7 +249,7 @@ impl<'a> Opencage<'a> {
     ///         "UCL, 188 Tottenham Court Road"
     /// ));
     /// ```
-    pub fn forward_full<T, U>(
+    pub async fn forward_full<T, U>(
         &self,
         place: &str,
         bounds: U,
@@ -274,7 +280,8 @@ impl<'a> Opencage<'a> {
             .client
             .get(&self.endpoint)
             .query(&query)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
         if let Some(headers) = resp.headers().get::<_>(XRL) {
             let mut lock = self.remaining.try_lock();
@@ -285,7 +292,7 @@ impl<'a> Opencage<'a> {
                 **mutex = Some(h)
             }
         }
-        let res: OpencageResponse<T> = resp.json()?;
+        let res: OpencageResponse<T> = resp.json().await?;
         Ok(res)
     }
 }
@@ -298,7 +305,10 @@ where
     /// returned `String` can be found [here](https://blog.opencagedata.com/post/99059889253/good-looking-addresses-solving-the-berlin-berlin)
     ///
     /// This method passes the `no_annotations` and `no_record` parameters to the API.
-    fn reverse(&self, point: &Point<T>) -> Result<Option<String>, GeocodingError> {
+    fn reverse(
+        &self,
+        point: &Point<T>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, GeocodingError>> + '_>> {
         let q = format!(
             "{}, {}",
             // OpenCage expects lat, lon order
@@ -313,25 +323,24 @@ where
         ];
         query.extend(self.parameters.as_query());
 
-        let resp = self
-            .client
-            .get(&self.endpoint)
-            .query(&query)
-            .send()?
-            .error_for_status()?;
-        if let Some(headers) = resp.headers().get::<_>(XRL) {
-            let mut lock = self.remaining.try_lock();
-            if let Ok(ref mut mutex) = lock {
-                // not ideal, but typed headers are currently impossible in 0.9.x
-                let h = headers.to_str()?;
-                let h: i32 = h.parse()?;
-                **mutex = Some(h)
+        let req = self.client.get(&self.endpoint).query(&query).send();
+
+        Box::pin(async move {
+            let resp = req.await?.error_for_status()?;
+            if let Some(headers) = resp.headers().get::<_>(XRL) {
+                let mut lock = self.remaining.try_lock();
+                if let Ok(ref mut mutex) = lock {
+                    // not ideal, but typed headers are currently impossible in 0.9.x
+                    let h = headers.to_str()?;
+                    let h: i32 = h.parse()?;
+                    **mutex = Some(h)
+                }
             }
-        }
-        let res: OpencageResponse<T> = resp.json()?;
-        // it's OK to index into this vec, because reverse-geocoding only returns a single result
-        let address = &res.results[0];
-        Ok(Some(address.formatted.to_string()))
+            let res: OpencageResponse<T> = resp.json().await?;
+            // it's OK to index into this vec, because reverse-geocoding only returns a single result
+            let address = &res.results[0];
+            Ok(Some(address.formatted.to_string()))
+        })
     }
 }
 
@@ -343,7 +352,10 @@ where
     /// of best practices in order to obtain good-quality results.
     ///
     /// This method passes the `no_annotations` and `no_record` parameters to the API.
-    fn forward(&self, place: &str) -> Result<Vec<Point<T>>, GeocodingError> {
+    fn forward(
+        &self,
+        place: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Point<T>>, GeocodingError>> + Send + '_>> {
         let mut query = vec![
             ("q", place),
             ("key", &self.api_key),
@@ -352,27 +364,26 @@ where
         ];
         query.extend(self.parameters.as_query());
 
-        let resp = self
-            .client
-            .get(&self.endpoint)
-            .query(&query)
-            .send()?
-            .error_for_status()?;
-        if let Some(headers) = resp.headers().get::<_>(XRL) {
-            let mut lock = self.remaining.try_lock();
-            if let Ok(ref mut mutex) = lock {
-                // not ideal, but typed headers are currently impossible in 0.9.x
-                let h = headers.to_str()?;
-                let h: i32 = h.parse()?;
-                **mutex = Some(h)
+        let req = self.client.get(&self.endpoint).query(&query).send();
+
+        Box::pin(async move {
+            let resp = req.await?.error_for_status()?;
+            if let Some(headers) = resp.headers().get::<_>(XRL) {
+                let mut lock = self.remaining.try_lock();
+                if let Ok(ref mut mutex) = lock {
+                    // not ideal, but typed headers are currently impossible in 0.9.x
+                    let h = headers.to_str()?;
+                    let h: i32 = h.parse()?;
+                    **mutex = Some(h)
+                }
             }
-        }
-        let res: OpencageResponse<T> = resp.json()?;
-        Ok(res
-            .results
-            .iter()
-            .map(|res| Point::new(res.geometry["lng"], res.geometry["lat"]))
-            .collect())
+            let res: OpencageResponse<T> = resp.json().await?;
+            Ok(res
+                .results
+                .iter()
+                .map(|res| Point::new(res.geometry["lng"], res.geometry["lat"]))
+                .collect())
+        })
     }
 }
 

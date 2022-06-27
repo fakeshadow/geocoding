@@ -23,7 +23,10 @@ use crate::UA_STRING;
 use crate::{Client, HeaderMap, HeaderValue, USER_AGENT};
 use crate::{Forward, Reverse};
 use num_traits::{Float, Pow};
+use serde::de::DeserializeOwned;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 
 /// An instance of the GeoAdmin geocoding service
 pub struct GeoAdmin {
@@ -155,9 +158,9 @@ impl GeoAdmin {
     ///     "Seftigenstrasse 264 <b>3084 Wabern</b>",
     /// );
     /// ```
-    pub fn forward_full<T>(
+    pub async fn forward_full<T>(
         &self,
-        params: &GeoAdminParams<T>,
+        params: &GeoAdminParams<'_, T>,
     ) -> Result<GeoAdminForwardResponse<T>, GeocodingError>
     where
         T: Float + Debug,
@@ -195,9 +198,10 @@ impl GeoAdmin {
             .client
             .get(&format!("{}SearchServer", self.endpoint))
             .query(&query)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
-        let res: GeoAdminForwardResponse<T> = resp.json()?;
+        let res: GeoAdminForwardResponse<T> = resp.json().await?;
         Ok(res)
     }
 }
@@ -221,13 +225,16 @@ impl Default for GeoAdmin {
 impl<T> Forward<T> for GeoAdmin
 where
     T: Float + Debug,
-    for<'de> T: Deserialize<'de>,
+    T: DeserializeOwned,
 {
     /// A forward-geocoding lookup of an address. Please see [the documentation](https://api3.geo.admin.ch/services/sdiservices.html#search) for details.
     ///
     /// This method passes the `type`,  `origins`, `limit` and `sr` parameter to the API.
-    fn forward(&self, place: &str) -> Result<Vec<Point<T>>, GeocodingError> {
-        let resp = self
+    fn forward(
+        &self,
+        place: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Point<T>>, GeocodingError>> + Send + '_>> {
+        let req = self
             .client
             .get(&format!("{}SearchServer", self.endpoint))
             .query(&[
@@ -238,22 +245,24 @@ where
                 ("sr", &self.sr),
                 ("geometryFormat", "geojson"),
             ])
-            .send()?
-            .error_for_status()?;
-        let res: GeoAdminForwardResponse<T> = resp.json()?;
-        // return easting & northing consistent
-        let results = if vec!["2056", "21781"].contains(&self.sr.as_str()) {
-            res.features
-                .iter()
-                .map(|feature| Point::new(feature.properties.y, feature.properties.x)) // y = west-east, x = north-south
-                .collect()
-        } else {
-            res.features
-                .iter()
-                .map(|feature| Point::new(feature.properties.x, feature.properties.y)) // x = west-east, y = north-south
-                .collect()
-        };
-        Ok(results)
+            .send();
+
+        Box::pin(async move {
+            let res: GeoAdminForwardResponse<T> = req.await?.error_for_status()?.json().await?;
+            // return easting & northing consistent
+            let results = if vec!["2056", "21781"].contains(&self.sr.as_str()) {
+                res.features
+                    .iter()
+                    .map(|feature| Point::new(feature.properties.y, feature.properties.x)) // y = west-east, x = north-south
+                    .collect()
+            } else {
+                res.features
+                    .iter()
+                    .map(|feature| Point::new(feature.properties.x, feature.properties.y)) // x = west-east, y = north-south
+                    .collect()
+            };
+            Ok(results)
+        })
     }
 }
 
@@ -266,8 +275,11 @@ where
     /// returned `String` can be found [here](https://api3.geo.admin.ch/services/sdiservices.html#identify-features)
     ///
     /// This method passes the `format` parameter to the API.
-    fn reverse(&self, point: &Point<T>) -> Result<Option<String>, GeocodingError> {
-        let resp = self
+    fn reverse(
+        &self,
+        point: &Point<T>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, GeocodingError>>>> {
+        let req = self
             .client
             .get(&format!("{}MapServer/identify", self.endpoint))
             .query(&[
@@ -289,19 +301,21 @@ where
                 ("sr", &self.sr),
                 ("lang", "en"),
             ])
-            .send()?
-            .error_for_status()?;
-        let res: GeoAdminReverseResponse = resp.json()?;
-        if !res.results.is_empty() {
-            let properties = &res.results[0].properties;
-            let address = format!(
-                "{}, {} {}",
-                properties.strname_deinr, properties.dplz4, properties.dplzname
-            );
-            Ok(Some(address))
-        } else {
-            Ok(None)
-        }
+            .send();
+
+        Box::pin(async move {
+            let res: GeoAdminReverseResponse = req.await?.error_for_status()?.json().await?;
+            if !res.results.is_empty() {
+                let properties = &res.results[0].properties;
+                let address = format!(
+                    "{}, {} {}",
+                    properties.strname_deinr, properties.dplz4, properties.dplzname
+                );
+                Ok(Some(address))
+            } else {
+                Ok(None)
+            }
+        })
     }
 }
 

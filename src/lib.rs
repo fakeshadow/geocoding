@@ -30,9 +30,9 @@ static UA_STRING: &str = "Rust-Geocoding";
 use chrono;
 pub use geo_types::{Coordinate, Point};
 use num_traits::Float;
-use reqwest::blocking::Client;
 use reqwest::header::ToStrError;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -91,7 +91,12 @@ where
     // NOTE TO IMPLEMENTERS: Point coordinates are lon, lat (x, y)
     // You may have to provide these coordinates in reverse order,
     // depending on the provider's requirements (see e.g. OpenCage)
-    fn reverse(&self, point: &Point<T>) -> Result<Option<String>, GeocodingError>;
+    fn reverse(
+        &self,
+        point: &Point<T>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<String>, GeocodingError>> + '_>,
+    >;
 }
 
 /// Forward-geocode a coordinate.
@@ -119,7 +124,12 @@ where
     // NOTE TO IMPLEMENTERS: while returned provider point data may not be in
     // lon, lat (x, y) order, Geocoding requires this order in its output Point
     // data. Please pay attention when using returned data to construct Points
-    fn forward(&self, address: &str) -> Result<Vec<Point<T>>, GeocodingError>;
+    fn forward(
+        &self,
+        address: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<Point<T>>, GeocodingError>> + Send + '_>,
+    >;
 }
 
 /// Used to specify a bounding box to search within when forward-geocoding

@@ -24,7 +24,10 @@ use crate::{Client, HeaderMap, HeaderValue, USER_AGENT};
 use crate::{Deserialize, Serialize};
 use crate::{Forward, Reverse};
 use num_traits::Float;
+use serde::de::DeserializeOwned;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 
 /// An instance of the Openstreetmap geocoding service
 pub struct Openstreetmap {
@@ -140,13 +143,13 @@ impl Openstreetmap {
     /// let result = res.features[0].properties.clone();
     /// assert!(result.display_name.contains("Gordon Square"));
     /// ```
-    pub fn forward_full<T>(
+    pub async fn forward_full<T>(
         &self,
-        params: &OpenstreetmapParams<T>,
+        params: &OpenstreetmapParams<'_, T>,
     ) -> Result<OpenstreetmapResponse<T>, GeocodingError>
     where
         T: Float + Debug,
-        for<'de> T: Deserialize<'de>,
+        T: DeserializeOwned,
     {
         let format = String::from("geojson");
         let addressdetails = String::from(if params.addressdetails { "1" } else { "0" });
@@ -168,9 +171,10 @@ impl Openstreetmap {
             .client
             .get(&format!("{}search", self.endpoint))
             .query(&query)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
-        let res: OpenstreetmapResponse<T> = resp.json()?;
+        let res: OpenstreetmapResponse<T> = resp.json().await?;
         Ok(res)
     }
 }
@@ -189,19 +193,25 @@ where
     /// A forward-geocoding lookup of an address. Please see [the documentation](https://nominatim.org/release-docs/develop/api/Search/) for details.
     ///
     /// This method passes the `format` parameter to the API.
-    fn forward(&self, place: &str) -> Result<Vec<Point<T>>, GeocodingError> {
-        let resp = self
+    fn forward(
+        &self,
+        place: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Point<T>>, GeocodingError>> + Send + '_>> {
+        let req = self
             .client
             .get(&format!("{}search", self.endpoint))
             .query(&[(&"q", place), (&"format", &String::from("geojson"))])
-            .send()?
-            .error_for_status()?;
-        let res: OpenstreetmapResponse<T> = resp.json()?;
-        Ok(res
-            .features
-            .iter()
-            .map(|res| Point::new(res.geometry.coordinates.0, res.geometry.coordinates.1))
-            .collect())
+            .send();
+
+        Box::pin(async move {
+            let res: OpenstreetmapResponse<T> = req.await?.error_for_status()?.json().await?;
+
+            Ok(res
+                .features
+                .iter()
+                .map(|res| Point::new(res.geometry.coordinates.0, res.geometry.coordinates.1))
+                .collect())
+        })
     }
 }
 
@@ -214,8 +224,11 @@ where
     /// returned `String` can be found [here](https://nominatim.org/release-docs/develop/api/Reverse/)
     ///
     /// This method passes the `format` parameter to the API.
-    fn reverse(&self, point: &Point<T>) -> Result<Option<String>, GeocodingError> {
-        let resp = self
+    fn reverse(
+        &self,
+        point: &Point<T>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, GeocodingError>>>> {
+        let req = self
             .client
             .get(&format!("{}reverse", self.endpoint))
             .query(&[
@@ -223,11 +236,13 @@ where
                 (&"lat", &point.y().to_f64().unwrap().to_string()),
                 (&"format", &String::from("geojson")),
             ])
-            .send()?
-            .error_for_status()?;
-        let res: OpenstreetmapResponse<T> = resp.json()?;
-        let address = &res.features[0];
-        Ok(Some(address.properties.display_name.to_string()))
+            .send();
+
+        Box::pin(async move {
+            let res: OpenstreetmapResponse<T> = req.await?.error_for_status()?.json().await?;
+            let address = &res.features[0];
+            Ok(Some(address.properties.display_name.to_string()))
+        })
     }
 }
 
